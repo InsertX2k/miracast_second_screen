@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">WFD Sink</string>
+    <string name="title_activity_display">DisplayActivity</string>
+    <string name="dummy_button">Dummy Button</string>
+    <string name="dummy_content">DUMMY\nCONTENT</string>
+    <string name="toast_failed_to_cleanup">Failed to do Cleanup tasks, PLEASE REBOOT YOUR DEVICE!</string>
+    <string name="toast_cleanup_success">App Closed, Removed P2P Group!</string>
+    <string name="exit_dialog_title">Exit?</string>
+    <string name="exit_dialog_content">Are you sure you want to exit?, This will close any ongoing Wi-Fi Display Connection and disconnect any devices currently connected to your device for Display data sharing?</string>
+    <string name="exit_dialog_yes">YES, EXIT AND DISCONNECT</string>
+    <string name="exit_dialog_no">NO, STAY CONNECTED</string>
+    <string name="info_p2p_group_changed">P2P Group Changed!: </string>
+    <string name="wifi_disabled">Wi-Fi is Disabled, Please turn it on to utilize Wi-Fi Direct Capabilities!</string>
+    <string name="location_disabled">Location is Disabled, Please turn it on to be able to broadcast yourself as a Display device to Wi-Fi direct devices!</string>
+</resources>
