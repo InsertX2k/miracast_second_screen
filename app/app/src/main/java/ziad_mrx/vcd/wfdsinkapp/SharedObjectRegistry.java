@@ -1,10 +1,14 @@
 package ziad_mrx.vcd.wfdsinkapp;
 
 import android.annotation.SuppressLint;
-import android.os.HandlerThread;
+import android.content.Context;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioTrack;
 
-import java.io.InvalidObjectException;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 @SuppressLint("StaticFieldLeak")
@@ -27,5 +31,30 @@ public class SharedObjectRegistry {
 
 
     public static String sink_ip_addr = "";
+
+    // AudioTrack buffer size in bytes
+    public static final int AUDIO_TRACK_BUF_SIZE = AudioTrack.getMinBufferSize(48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT); // 20 KB buffer
+
+    // Audio Attributes
+    public static final AudioAttributes AUDIO_TRACK_ATTRIBS = (new AudioAttributes.Builder()).setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_ALL)
+            .build();
+    // AudioFormat
+    public static final AudioFormat AUDIO_FMT = (new AudioFormat.Builder()).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(48000) // 48kHz
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .build();
+
+    public static int AUDIO_TRACK_SESSION_ID = AudioManager.ERROR;
+
+    /*
+    * A boolean specifying whether or not our sink is allowed to play the audio payload coming from the
+    * source.
+    *
+    * if false, the constructor of AudioPayloadHandler must avoid creating an AudioTrack object
+    * and avoid handling any interactions at all.
+    * */
+    public static AtomicBoolean canPlayAudio = new AtomicBoolean(true);
 
 }

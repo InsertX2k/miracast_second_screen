@@ -1,6 +1,7 @@
 package ziad_mrx.vcd.wfdsinkapp;
 
 import android.content.Context;
+import android.media.AudioManager;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -31,6 +32,8 @@ public class DisplayActivity extends AppCompatActivity implements SurfaceHolder.
     private NetworkPacketReceiver mNetPacketReceiver;
     WifiManager wm;
     WifiManager.WifiLock wifiLock;
+
+    private AudioPayloadHandler mAPH;
 
     @RequiresApi(api = Build.VERSION_CODES.TIRAMISU)
     @Override
@@ -77,9 +80,15 @@ public class DisplayActivity extends AppCompatActivity implements SurfaceHolder.
 
     @Override
     public void surfaceCreated(@NonNull SurfaceHolder holder) {
+        // Generate Audio Session ID
+        AudioManager am = (AudioManager) getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+        SharedObjectRegistry.AUDIO_TRACK_SESSION_ID = am.generateAudioSessionId();
+        Log.i(TAG, "Audio Track Session ID: " + (SharedObjectRegistry.AUDIO_TRACK_SESSION_ID == AudioManager.ERROR ? "Failed to retrieve" : SharedObjectRegistry.AUDIO_TRACK_SESSION_ID));
+        mAPH = new AudioPayloadHandler();
         // Feed live hardware Surface back into TS extraction pipeline
-        mDecoderEngine = new MpegTsPayloadDecoder(holder.getSurface());
+        mDecoderEngine = new MpegTsPayloadDecoder(holder.getSurface(), mAPH);
         mDecoderEngine.start();
+        mAPH.start(); // start Audio Payload Handler thread!
     }
 
     @Override

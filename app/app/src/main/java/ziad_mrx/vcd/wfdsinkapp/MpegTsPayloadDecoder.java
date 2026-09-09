@@ -17,6 +17,7 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 
@@ -30,11 +31,16 @@ public class MpegTsPayloadDecoder extends Thread {
 
     // H.264 Streaming Window Buffer
     private final byte[] mStreamBuffer = new byte[2 * 1024 * 1024]; // 2MB sliding buffer
+
+    private final byte[] mAudioStreamBuffer = new byte[4 * 48000]; // 1 second buffer
     private int mBufferLength = 0;
+
+    private int mAudioBufferLength = 0;
 
     // Parsed PIDs
     private int mPmtPid = -1;
     private int mVideoPid = -1;
+    private int mAudioPid = -1;
 
     // ArrayBlockingQueue for storing pending NALus
     public ArrayBlockingQueue<byte[]> mPendingNALus = new ArrayBlockingQueue<>(500); // maximum capacity of 500 NALus.
@@ -43,9 +49,11 @@ public class MpegTsPayloadDecoder extends Thread {
     private ArrayBlockingQueue<Integer> mAvailableInputBuffersIndexs = new ArrayBlockingQueue<Integer>(32); // more than enough I guess.
     private final Object mFeederLock = new Object();
 
+    private final AudioPayloadHandler mAudioPayloadHandler;
 
-    public MpegTsPayloadDecoder(Surface surface) {
+    public MpegTsPayloadDecoder(Surface surface, AudioPayloadHandler audiopayloadhandler) {
         this.mSurface = surface;
+        this.mAudioPayloadHandler = audiopayloadhandler;
     }
 
     @Override
@@ -145,7 +153,9 @@ public class MpegTsPayloadDecoder extends Thread {
                     parsePmt(data, payloadOffset);
                 } else if (pid == mVideoPid) {
                     parseVideoPes(data, payloadOffset, offset + 188, pusi);
-                }  // TODO: New else if for parsing Audio packets after retrieving its PID from PMT
+                } else if (pid == mAudioPid) {
+                    parseAudioPes(data, payloadOffset, offset + 188, pusi);
+                }
             }
         }
     }
@@ -163,14 +173,22 @@ public class MpegTsPayloadDecoder extends Thread {
         int streamOffset = sectionStart + 12 + programInfoLength;
 
         while (streamOffset < offset + 184) {
+            if ((mVideoPid != -1) && (mAudioPid != -1)) break;
+
+
             int streamType = data[streamOffset] & 0xFF;
             int elementaryPid = ((data[streamOffset + 1] & 0x1F) << 8) | (data[streamOffset + 2] & 0xFF);
             int esInfoLength = ((data[streamOffset + 3] & 0x0F) << 8) | (data[streamOffset + 4] & 0xFF);
 
             if (streamType == 0x1B) { // 0x1B corresponds to AVC / H.264
                 mVideoPid = elementaryPid;
-                break;
-            } // TODO: Check if streamType == ID of LPCM Audio packets
+            }
+            if (streamType == 0x83) { // raw LPCM
+                Log.i(TAG, "Found PID for RAW LPCM!: " + elementaryPid);
+                mAudioPid = elementaryPid;
+            }
+
+
             streamOffset += 5 + esInfoLength;
         }
     }
@@ -192,6 +210,63 @@ public class MpegTsPayloadDecoder extends Thread {
             extractNalUnits();
         }
     }
+
+    private void parseAudioPes(byte[] data, int offset, int end, boolean pusi) {
+        int dataToReadOffset = offset;
+        if (pusi) {
+            // Check for PES start code (0x000001)
+            if (data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1) {
+                int pesHeaderLen = data[offset + 8] & 0xFF;
+                dataToReadOffset = offset + 9 + pesHeaderLen + 4; // LPCM header only appears when PUSI = 1
+            }
+        }
+
+        int length = end - dataToReadOffset;
+        if (length > 0 && mAudioBufferLength + length <= mAudioStreamBuffer.length) {
+            System.arraycopy(data, dataToReadOffset, mAudioStreamBuffer, mAudioBufferLength, length);
+            mAudioBufferLength += length;
+            extractLpcmFrames();
+        }
+    }
+
+    private void inplaceConvertToLE(byte[] buffer, int length) {
+        // Process full 4-byte stereo frames to prevent out-of-bounds reads
+        int limit = length - (length % 4);
+
+        for (int i = 0; i < limit; i += 4) {
+            // Swap Left Channel
+            byte b0 = buffer[i];
+            buffer[i] = buffer[i + 1];
+            buffer[i + 1] = b0;
+
+            // Swap Right Channel
+            byte b2 = buffer[i + 2];
+            buffer[i + 2] = buffer[i + 3];
+            buffer[i + 3] = b2;
+        }
+    }
+
+    private void extractLpcmFrames() {
+        if (mAudioBufferLength < 4) return; // if we don't even have a single frame why continue?
+        int _origAudioBufLen = mAudioBufferLength;
+        byte[] _writebuf = new byte[4]; // write buffer
+        for (int i = 0; i < _origAudioBufLen;) {
+            if (( i + 4 ) <= _origAudioBufLen) {
+                System.arraycopy(mAudioStreamBuffer, i, _writebuf, 0, 4);
+                inplaceConvertToLE(_writebuf, _writebuf.length);
+                mAudioPayloadHandler.addToQueue(_writebuf.clone());
+                mAudioBufferLength -= 4;
+                i += 4;
+            } else {
+                byte[] _tmpbuf = new byte[mAudioBufferLength];
+                System.arraycopy(mAudioStreamBuffer, i, _tmpbuf, 0, mAudioBufferLength);
+                Arrays.fill(mAudioStreamBuffer, (byte) 0);
+                System.arraycopy(_tmpbuf,0,mAudioStreamBuffer,0,mAudioBufferLength);
+                return;
+            }
+        }
+    }
+
 
     private void extractNalUnits() {
         if (mBufferLength < 3) return;

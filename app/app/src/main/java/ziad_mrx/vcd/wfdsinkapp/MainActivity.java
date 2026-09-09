@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
 import android.location.LocationManager;
+import android.media.AudioManager;
 import android.net.NetworkInfo;
 import android.net.wifi.p2p.WifiP2pDevice;
 import android.net.wifi.p2p.WifiP2pInfo;
@@ -120,6 +121,7 @@ public class MainActivity extends AppCompatActivity {
 
         // add hooks for when an app might be forceibly terminated.
 //        Runtime.getRuntime().addShutdownHook(); // TODO - Request a shutdown hook thread!!!
+
 
         // starting sink only if canStartSink is true
         if (canStartSink) {
