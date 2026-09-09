@@ -16,7 +16,8 @@ Miracast/Wi-Fi Display Sink implementation from scratch for Android devices. [Re
 * Works and tested on both Windows and Android (Samsung Smart View) Sources.
 
 ## Plans for improvement (will be applied in no order)
-* Implement audio stream playback (using LPCM, no decoding needed, plus supported by nearly all Miracast capable sources)
+* ✅ ~~Implement audio stream playback (using LPCM, no decoding needed, plus supported by nearly all Miracast capable sources)~~
+* Implement a working A/V sync based on received per-A/V PTS values relative to a internal clock that's synced according to PCR.
 * Implement UIBC (User Input Back Channel); Just touch that registers properly on the source.
 * Add support for `M15` (`wfd_standby`) RTSP Messages
 * Fix UI bugs (when source disconnects during an active session the app just freezes).
