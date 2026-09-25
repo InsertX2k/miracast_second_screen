@@ -7,4 +7,76 @@
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
+
+    <com.airbnb.lottie.LottieAnimationView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:lottie_autoPlay="true"
+        app:lottie_fileName="bg.json"
+        app:lottie_loop="true"
+        android:scaleType="centerCrop"
+        />
+    <RelativeLayout
+        android:id="@+id/content"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:paddingStart="40dp"
+        android:paddingEnd="40dp"
+        android:paddingTop="15dp"
+        android:paddingBottom="25dp"
+        >
+        <ImageView
+            android:id="@+id/ico"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentTop="true"
+            android:layout_alignParentBottom="false"
+            android:contentDescription="Miracast Second Screen Icon"
+            android:src="@mipmap/ic_launcher"
+            />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:layout_alignParentBottom="false"
+            android:layout_alignParentTop="false"
+            android:layout_toEndOf="@id/ico"
+            android:layout_marginStart="10dp"
+            android:layout_centerVertical="true"
+            android:layout_alignTop="@id/ico"
+            android:layout_alignBottom="@id/ico"
+            android:gravity="center"
+            android:textStyle="bold"
+            android:textSize="24sp"
+            android:textColor="@color/black"/>
+
+
+
+
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_alignParentBottom="true">
+            <ProgressBar
+                android:id="@+id/holo_vertical_progress"
+                style="@android:style/Widget.Holo.ProgressBar.Horizontal"
+                android:layout_width="480dp"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:indeterminate="true"
+                android:rotation="0" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/waiting_for_connection"
+                android:textColor="@color/black"
+                />
+
+        </LinearLayout>
+    </RelativeLayout>
+
+
+
 </androidx.constraintlayout.widget.ConstraintLayout>

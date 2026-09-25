@@ -1,68 +1,259 @@
 package ziad_mrx.vcd.wfdsinkapp;
 
+import android.content.pm.PackageManager;
 import android.media.AudioManager;
+import android.media.AudioTimestamp;
 import android.media.AudioTrack;
+import android.os.Process;
 import android.util.Log;
 
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Plays LPCM fragments produced by MpegTsPayloadDecoder, aligning the first fragment of every PES
+ * to its target time (source PTS -> local monotonic) by padding silence or dropping samples.
+ *
+ * UNITS: every counter in this class is in FRAMES (1 frame = 2 shorts = 4 bytes).
+ * AudioTrack.write(short[]...) returns SHORTS, AudioTrack.write(byte[]...) returns BYTES.
+ * All writes go through writeShorts() so the conversion happens in exactly one place.
+ */
 public class AudioPayloadHandler extends Thread {
     private static final String TAG = "AudioPayloadHandler";
+
+    private static final long NS_PER_SEC = 1_000_000_000L;
+    private static final int SHORTS_PER_FRAME = 2; // 16-bit stereo
+
+    /** |gap| below this is ignored: every correction is an audible discontinuity, and timestamps jitter by ~1-2 ms. */
+    private static final long DEADBAND_NS = 4_000_000L;
+    /** |gap| above this: drop what's buffered in the AudioTrack (flush) and re-align against an empty pipeline. */
+    private static final long RESYNC_THRESHOLD_NS = 150_000_000L;
+    /** Never insert more silence than this in one alignment. */
+    private static final long MAX_PAD_NS = 200_000_000L;
+
+    /**
+     * Independent of PTS/clock state entirely: a hard cap on how much un-written audio may sit in
+     * mLpcmPayloadQueue. Checked every loop iteration. If exceeded, fragments are discarded
+     * (no write() call) down to DRAIN_TARGET_NS. This is the actual fix for "queue stuck near
+     * capacity, backlog never shrinks" -- it cannot be starved by a missed marker or a momentarily
+     * invalid AudioTrack timestamp the way the gap check below can.
+     */
+    private static final long MAX_QUEUE_BACKLOG_NS = 80_000_000L;
+    private static final long DRAIN_TARGET_NS = 20_000_000L;
+    private final long samplingRate = SharedObjectRegistry.AUDIO_SAMPLING_RATE;
+    private final long targetBacklogNs = SharedObjectRegistry.TARGET_BACKLOG_NS;
+
     private AudioTrack mAudioTrack;
+    private final ArrayBlockingQueue<AudioPESFragment> mLpcmPayloadQueue = new ArrayBlockingQueue<>(1512);
+	/** Frames of actual sample data (markers excluded) currently sitting in mLpcmPayloadQueue, unwritten. */
+    private final AtomicLong queuedFrames = new AtomicLong(0);
 
-    private ArrayBlockingQueue<byte[]> mLpcmPayloadQueue = new ArrayBlockingQueue<>(96000); // 48000 audio frames max
+    // ---- playback accounting (frames) ----
+    private long framesWritten = 0;
+    private long lastPlayedFrameIndex = 0;
+    private long anchorTimeNs = 0;
+    private boolean haveAnchor = false; // true once getTimestamp() has succeeded since the last (re)start
 
+    // ---- alignment state ----
+    /** Monotonic ns at which the next sample fragment should START playing. -1 = current PES already aligned. */
+    private long tTarget = -1;
+    /** Frames still to drop from the incoming stream (spans fragments; recomputed at the next alignment). */
+    private long pendingSkipFrames = 0;
 
-    public AudioPayloadHandler() {
+    private final short[] zeroBuf;
+
+    // ---- diagnostics ----
+    private long lastStatNs = 0;
+    private long resyncCount = 0;
+    private long watchdogDropCount = 0;
+    private volatile long droppedFragments = 0;
+
+    public AudioPayloadHandler(boolean supportsLowLatency, int lowLatencyBufSize) {
+        this.zeroBuf = new short[(int) (samplingRate / 4) * SHORTS_PER_FRAME]; // 250 ms of silence
+        Log.i(TAG, supportsLowLatency ? "Device Supports Low Latency Audio!" : "Device Does NOT Support Low Latency Audio!");
         if (SharedObjectRegistry.AUDIO_TRACK_SESSION_ID != AudioManager.ERROR) {
-            // AudioAttributes attributes, AudioFormat format, int bufferSizeInBytes, int mode, int sessionId
             this.mAudioTrack = (new AudioTrack.Builder()).setAudioAttributes(SharedObjectRegistry.AUDIO_TRACK_ATTRIBS)
                     .setAudioFormat(SharedObjectRegistry.AUDIO_FMT)
                     .setTransferMode(AudioTrack.MODE_STREAM)
-                    .setBufferSizeInBytes(SharedObjectRegistry.AUDIO_TRACK_BUF_SIZE)
+                    .setBufferSizeInBytes(supportsLowLatency ? (lowLatencyBufSize*4) : SharedObjectRegistry.AUDIO_TRACK_BUF_SIZE)
                     .setSessionId(SharedObjectRegistry.AUDIO_TRACK_SESSION_ID)
+                    .setPerformanceMode(supportsLowLatency ? AudioTrack.PERFORMANCE_MODE_LOW_LATENCY : AudioTrack.PERFORMANCE_MODE_NONE)
                     .build();
 
             if (this.mAudioTrack.getState() != AudioTrack.STATE_INITIALIZED) {
                 Log.e(TAG, "*******  AudioTrack object failed to initialize!!!!");
+                SharedObjectRegistry.canPlayAudio.set(false);
             }
+            if (this.mAudioTrack.getPerformanceMode() == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY) Log.i(TAG, "Low latency mode ENABLED!");
+
         } else {
             Log.e(TAG, "AUDIO_TRACK_SESSION_ID was ERROR at construction time!");
             SharedObjectRegistry.canPlayAudio.set(false); // can't play audio
         }
     }
 
-
     @Override
     public void run() {
+        if (!SharedObjectRegistry.canPlayAudio.get() || mAudioTrack == null) return;
         try {
-            if (SharedObjectRegistry.canPlayAudio.get()) {
-                // play AudioTrack
-                this.mAudioTrack.play();
-                byte[] _buf = null;
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
+            mAudioTrack.play();
+            final AudioTimestamp ts = new AudioTimestamp();
 
-                while (true) {
-                    _buf = mLpcmPayloadQueue.take();
-                    int res = this.mAudioTrack.write(_buf, 0, _buf.length);
-                    if (res < 0) Log.e(TAG, "AudioTrack failed to write...: " + res);
+            while (!isInterrupted()) {
+                if (mAudioTrack.getTimestamp(ts)) {
+                    anchorTimeNs = ts.nanoTime;
+                    lastPlayedFrameIndex = ts.framePosition;
+                    haveAnchor = true;
+                }
+
+                // ---- watchdog: collapse any SW-queue backlog BEFORE touching this iteration's fragment ----
+                // Deliberately does not depend on tTarget/haveAnchor: it only counts frames.
+                long queueBacklogNs = queuedFrames.get() * NS_PER_SEC / samplingRate;
+                if (queueBacklogNs > MAX_QUEUE_BACKLOG_NS) {
+                    long targetFrames = DRAIN_TARGET_NS * samplingRate / NS_PER_SEC;
+                    while (queuedFrames.get() > targetFrames) {
+                        AudioPESFragment drop = mLpcmPayloadQueue.poll();
+                        if (drop == null) break;
+                        if (drop.samples == null) {
+                            // don't throw this away: keep the alignment target fresh for when we come out of the drain
+                            tTarget = NativeSourceSTCTracker.sourceSTCToMonotonic(NativeSourceSTCTracker.toNanoSeconds(drop.pts));
+                        } else {
+                            queuedFrames.addAndGet(-(drop.samples.length / SHORTS_PER_FRAME));
+                            watchdogDropCount++;
+                        }
+                    }
+                    pendingSkipFrames = 0; // whatever's left is close to live; no extra deadband skip needed
+                }
+                AudioPESFragment elem = mLpcmPayloadQueue.poll();
+                if (elem != null && elem.samples != null) {
+                    queuedFrames.addAndGet(-(elem.samples.length / SHORTS_PER_FRAME));
+                }
+                final long now = System.nanoTime();
+                long coverageEndNs = coverageEnd(now);
+                logStats(now, coverageEndNs, queueBacklogNs);
+
+                // ---- starved: keep a small cushion of silence so the track never underruns ----
+                if (elem == null) {
+                    if (haveAnchor) {
+                        long backlogNs = coverageEndNs - now; // >= 0 by construction
+                        if (backlogNs < targetBacklogNs) {
+                            writeSilence((targetBacklogNs - backlogNs) * samplingRate / NS_PER_SEC);
+                        }
+                    }
+//                    LockSupport.parkNanos(20_000L); // don't busy-spin at audio priority
+                    continue;
+                }
+
+                // ---- PES boundary marker ----
+                if (elem.samples == null) {
+                    tTarget = NativeSourceSTCTracker.sourceSTCToMonotonic(NativeSourceSTCTracker.toNanoSeconds(elem.pts));
+                    continue;
+                }
+
+                // ---- first sample fragment after a marker: align to target ----
+                if (tTarget != -1) {
+                    if (haveAnchor) {
+                        long gapNs = tTarget - coverageEndNs; // >0: would play early -> pad. <0: would play late -> skip.
+                        if (Math.abs(gapNs) > RESYNC_THRESHOLD_NS) {
+                            Log.w(TAG, "Resync: gapNs=" + gapNs + ", flushing AudioTrack");
+                            resetTrack();
+                            gapNs = tTarget - System.nanoTime(); // pipeline is empty now: next write starts ~now
+                        }
+                        // Recomputed from scratch each time, so any leftover skip from the previous PES is
+                        // already accounted for in gapNs (skipped frames were never written).
+                        pendingSkipFrames = 0;
+                        if (gapNs > DEADBAND_NS) {
+                            writeSilence(Math.min(gapNs, MAX_PAD_NS) * samplingRate / NS_PER_SEC);
+                        } else if (gapNs < -DEADBAND_NS) {
+                            pendingSkipFrames = (-gapNs) * samplingRate / NS_PER_SEC;
+                        }
+                        tTarget = -1;
+                    } else {
+                        // No valid timestamp yet (start or right after a flush). Don't act on invented data:
+                        // write ASAP; alignment resumes once getTimestamp() succeeds.
+                        tTarget = -1;
+                    }
+                }
+
+                // ---- write (dropping frames if we're behind), always in FRAME units ----
+                short[] samples = elem.samples;
+                int offsetShorts = 0;
+                if (pendingSkipFrames > 0) {
+                    int frames = samples.length / SHORTS_PER_FRAME;
+                    if (pendingSkipFrames >= frames) {
+                        pendingSkipFrames -= frames;
+                        continue; // whole fragment dropped
+                    }
+                    offsetShorts = (int) pendingSkipFrames * SHORTS_PER_FRAME;
+                    pendingSkipFrames = 0;
+                }
+                int n = writeShorts(samples, offsetShorts, samples.length - offsetShorts);
+                if (n < 0) {
+                    Log.e(TAG, "AudioTrack.write() failed: " + n);
+                    return;
                 }
             }
         } catch (Throwable t) {
-            Log.e(TAG, "Error has occured: " + t.getMessage());
-            return;
+            Log.e(TAG, "Error has occured: " + t.getMessage(), t);
         }
     }
 
-    public void addToQueue(byte[] input) {
-        if (input != null) {
-            if (input.length > 0) {
-                boolean res = mLpcmPayloadQueue.offer(input);
-                if (!res) {
-                    Log.e(TAG, "Attempted to add another LPCM audio frame to an already filled up queue!!!!");
-                }
+    /** Where the audio already handed to the AudioTrack will finish playing (monotonic ns). Never earlier than now. */
+    private long coverageEnd(long now) {
+        if (!haveAnchor) return now;
+        long backlogFrames = Math.max(0, framesWritten - lastPlayedFrameIndex);
+        long predicted = anchorTimeNs + backlogFrames * NS_PER_SEC / samplingRate;
+        return Math.max(predicted, now);
+    }
+
+    /** write(short[]) returns SHORTS. framesWritten counts FRAMES. */
+    private int writeShorts(short[] buf, int offsetShorts, int lenShorts) {
+        int n = mAudioTrack.write(buf, offsetShorts, lenShorts, AudioTrack.WRITE_BLOCKING);
+        if (n > 0) framesWritten += n / SHORTS_PER_FRAME;
+        return n;
+    }
+
+    private void writeSilence(long frames) {
+        while (frames > 0) {
+            int chunk = (int) Math.min(frames, zeroBuf.length / SHORTS_PER_FRAME);
+            int n = writeShorts(zeroBuf, 0, chunk * SHORTS_PER_FRAME);
+            if (n <= 0) return;
+            frames -= n / SHORTS_PER_FRAME;
+        }
+    }
+
+    private void resetTrack() {
+        mAudioTrack.pause();
+        mAudioTrack.flush(); // also restarts the playback position at 0
+        mAudioTrack.play();
+        framesWritten = 0;
+        lastPlayedFrameIndex = 0;
+        anchorTimeNs = 0;
+        haveAnchor = false;
+        resyncCount++;
+    }
+
+    private void logStats(long now, long coverageEndNs, long queueBacklogNs) {
+        if (now - lastStatNs < NS_PER_SEC) return;
+        lastStatNs = now;
+        Log.i(TAG, String.format(
+                "stats: hwBacklogMs=%.1f swQueueMs=%.1f rawWrittenMinusPlayed=%d queue=%d underruns=%d resyncs=%d evicted=%d watchdogDropped=%d",
+                (coverageEndNs - now) / 1e6, queueBacklogNs / 1e6, (framesWritten - lastPlayedFrameIndex),
+                mLpcmPayloadQueue.size(), mAudioTrack.getUnderrunCount(), resyncCount, droppedFragments, watchdogDropCount));
+    }
+
+    /** Producer side. On overflow, drop the OLDEST fragment so the queue always holds the live edge. */
+    public void addToQueue(AudioPESFragment input) {
+        if (input == null) return;
+        int frames = (input.samples != null) ? input.samples.length / SHORTS_PER_FRAME : 0;
+        while (!mLpcmPayloadQueue.offer(input)) {
+            AudioPESFragment evicted = mLpcmPayloadQueue.poll();
+            if (evicted != null && evicted.samples != null) {
+                queuedFrames.addAndGet(-(evicted.samples.length / SHORTS_PER_FRAME));
             }
+            droppedFragments++;
         }
+        if (frames > 0) queuedFrames.addAndGet(frames);
     }
-
-
 }

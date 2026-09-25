@@ -12,4 +12,5 @@
     <string name="info_p2p_group_changed">P2P Group Changed!: </string>
     <string name="wifi_disabled">Wi-Fi is Disabled, Please turn it on to utilize Wi-Fi Direct Capabilities!</string>
     <string name="location_disabled">Location is Disabled, Please turn it on to be able to broadcast yourself as a Display device to Wi-Fi direct devices!</string>
+    <string name="waiting_for_connection">Waiting for connection...</string>
 </resources>

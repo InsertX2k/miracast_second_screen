@@ -16,10 +16,13 @@ import androidx.annotation.NonNull;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.ShortBuffer;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
+import android.os.Trace;
 
 public class MpegTsPayloadDecoder extends Thread {
     private static final String TAG = "MpegTsDecoder";
@@ -51,6 +54,23 @@ public class MpegTsPayloadDecoder extends Thread {
 
     private final AudioPayloadHandler mAudioPayloadHandler;
 
+    // epoch base to handle wrap-arounds in the parsed PTS/PCR values
+    private long stc_epoch = 0;
+    private long last_stc_value = -1;
+
+    private byte[] __raw_pcr_bytes = new byte[6];
+
+    private long __parsed_pcr_base = -1;
+
+    private double __audio_pes_packet_length_ns = 0;
+
+    private long __last_audio_pts_value = -1;
+
+    private long target_video_presentation_ns = -1;
+
+    private byte[] __video_pts_t_buffer = new byte[9]; // 8 (64-bits) for long + 1 byte for marker 'X'.
+
+
     public MpegTsPayloadDecoder(Surface surface, AudioPayloadHandler audiopayloadhandler) {
         this.mSurface = surface;
         this.mAudioPayloadHandler = audiopayloadhandler;
@@ -59,8 +79,8 @@ public class MpegTsPayloadDecoder extends Thread {
     @Override
     public void run() {
         // increase thread priority
-        android.os.Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
-        HandlerThread ht = new HandlerThread(SharedObjectRegistry.HANDLER_THREAD_NAME, Process.THREAD_PRIORITY_URGENT_AUDIO);
+        android.os.Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
+        HandlerThread ht = new HandlerThread(SharedObjectRegistry.HANDLER_THREAD_NAME, Process.THREAD_PRIORITY_URGENT_DISPLAY);
         try {
             mCodec = MediaCodec.createByCodecName(getOptimalAVCDecoderName());
             MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1920, 1080);
@@ -90,7 +110,23 @@ public class MpegTsPayloadDecoder extends Thread {
 
                 @Override
                 public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-                    codec.releaseOutputBuffer(index, true);
+                    // release output buffer immediately if it contains no video data
+                    if (info.size <= 0) {
+                        codec.releaseOutputBuffer(index, false);
+                        return;
+                    }
+                    if (info.presentationTimeUs <= 0) {
+                        // release immediately
+                        codec.releaseOutputBuffer(index, true);
+                        return;
+                    }
+                    if ((System.nanoTime() / (long)1000) > (info.presentationTimeUs + SharedObjectRegistry.VIDEO_FRAME_DISPLAY_ACCEPTABLE_DELAY_US)) {
+                        // we're late, just drop already
+                        codec.releaseOutputBuffer(index, false);
+                        Log.w(TAG, "Dropped frame at output buffer index: " + index + ", Arrived too late!");
+                    } else {
+                        codec.releaseOutputBuffer(index, info.presentationTimeUs);
+                    }
                 }
 
                 @Override
@@ -135,6 +171,12 @@ public class MpegTsPayloadDecoder extends Thread {
     private void processTsPacket(byte[] data, int offset) {
         if (data[offset] != 0x47) return; // Sync byte check
 
+        boolean tei = (data[offset + 1] & 0x80) != 0;
+        if (tei) {
+            Log.w(TAG, "Received a corrupt TS packet, ignoring...");
+            return;
+        }
+
         int pid = ((data[offset + 1] & 0x1F) << 8) | (data[offset + 2] & 0xFF);
         boolean pusi = (data[offset + 1] & 0x40) != 0;
         int adaptation = (data[offset + 3] & 0x30) >> 4;
@@ -142,6 +184,26 @@ public class MpegTsPayloadDecoder extends Thread {
         int payloadOffset = offset + 4;
         if (adaptation == 2 || adaptation == 3) {
             int afLen = data[offset + 4] & 0xFF;
+            boolean hasPcr = (data[offset + 5] & 0x10) != 0;
+            if (hasPcr) {
+                // we have pcr, let's parse it
+                __raw_pcr_bytes[0] = data[offset + 6];
+                __raw_pcr_bytes[1] = data[offset + 7];
+                __raw_pcr_bytes[2] = data[offset + 8];
+                __raw_pcr_bytes[3] = data[offset + 9];
+                __raw_pcr_bytes[4] = data[offset + 10];
+                __raw_pcr_bytes[5] = data[offset + 11];
+                __parsed_pcr_base = ((long) __raw_pcr_bytes[0] << 25) | ((long) __raw_pcr_bytes[1] << 17) | ((long) __raw_pcr_bytes[2] << 9)
+                        | ((long) __raw_pcr_bytes[3] << 1)  | (__raw_pcr_bytes[4] >>> 7);
+
+                // we need to check if a wraparound happened or not first.
+                if ((last_stc_value != -1) && (__parsed_pcr_base < (last_stc_value - SharedObjectRegistry.PCR_JITTER_MARGIN))) {
+                    stc_epoch += SharedObjectRegistry.MAXIMUM_PCR_BASE_VALUE;
+                }
+                last_stc_value = stc_epoch + __parsed_pcr_base;
+                // feed pcr
+                NativeSourceSTCTracker.feedPCR(NativeSourceSTCTracker.toNanoSeconds(last_stc_value));
+            }
             payloadOffset = offset + 5 + afLen;
         }
 
@@ -193,11 +255,55 @@ public class MpegTsPayloadDecoder extends Thread {
         }
     }
 
+
     private void parseVideoPes(byte[] data, int offset, int end, boolean pusi) {
         int dataToReadOffset = offset;
         if (pusi) {
+            if (mBufferLength > 0) { feedToDecoder(Arrays.copyOf(mStreamBuffer, mBufferLength)); mBufferLength = 0; }
             // Check for PES start code (0x000001)
             if (data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1) {
+                boolean hasPts = ((data[offset + 6] & 0xFF) & 3) >= 2;
+                if (hasPts) {
+                    int ptsStartOffset = offset + 9;
+                    // Read the 5 sequential bytes representing the PTS structure
+                    long b0 = data[ptsStartOffset]     & 0xFF;
+                    long b1 = data[ptsStartOffset + 1] & 0xFF;
+                    long b2 = data[ptsStartOffset + 2] & 0xFF;
+                    long b3 = data[ptsStartOffset + 3] & 0xFF;
+                    long b4 = data[ptsStartOffset + 4] & 0xFF;
+
+                    // Isolate and stitch the 33 bits:
+                    // Chunk 1: Bits 32-30 (from b0) -> mask with 0x0E, shift right 1, then shift up to bit 30
+                    long pts = stc_epoch + ((((b0 & 0x0E) >> 1) << 30) |
+                            // Chunk 2: Bits 29-15 (from b1 and b2) -> combine b1 and b2, mask out the LSB marker bit of b2, shift up to bit 15
+                            (((((b1 << 8) | b2) & 0xFFFE) >> 1) << 15) |
+                            // Chunk 3: Bits 14-0 (from b3 and b4) -> combine b3 and b4, mask out the LSB marker bit of b4
+                            ((((b3 << 8) | b4) & 0xFFFE) >> 1));
+
+                    // store that as a byte[] to write to the queue
+                    __video_pts_t_buffer[0] = SharedObjectRegistry.VIDEO_PTS_MARKER; // 'X'
+                    __video_pts_t_buffer[1] = (byte)(pts >>> 56);
+                    __video_pts_t_buffer[2] = (byte)(pts >>> 48);
+                    __video_pts_t_buffer[3] = (byte)(pts >>> 40);
+                    __video_pts_t_buffer[4] = (byte)(pts >>> 32);
+                    __video_pts_t_buffer[5] = (byte)(pts >>> 24);
+                    __video_pts_t_buffer[6] = (byte)(pts >>> 16);
+                    __video_pts_t_buffer[7] = (byte)(pts >>> 8);
+                    __video_pts_t_buffer[8] = (byte)pts;
+                    // offer that to the queue
+                    try {mPendingNALus.put(__video_pts_t_buffer.clone());} catch (
+                            InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+
+                } else {
+                    Arrays.fill(__video_pts_t_buffer, (byte) 0x00);
+                    __video_pts_t_buffer[0] = SharedObjectRegistry.VIDEO_PTS_MARKER; // 'X'
+                    try {mPendingNALus.put(__video_pts_t_buffer.clone());} catch (
+                            InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
                 int pesHeaderLen = data[offset + 8] & 0xFF;
                 dataToReadOffset = offset + 9 + pesHeaderLen;
             }
@@ -216,7 +322,47 @@ public class MpegTsPayloadDecoder extends Thread {
         if (pusi) {
             // Check for PES start code (0x000001)
             if (data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1) {
+                int __pes_data_length_after_base_header = ((data[offset + 4] & 0xFF) << 8) | (data[offset + 5] & 0xFF);
                 int pesHeaderLen = data[offset + 8] & 0xFF;
+                int __audio_payload_length_bytes = (__pes_data_length_after_base_header - 3 - pesHeaderLen);
+                // i want to see if i have pts here or not first
+                boolean hasPts = ((data[offset + 6] & 0xFF) & 3) >= 2;
+                if (hasPts) {
+                    int ptsStartOffset = offset + 9;
+                    // Read the 5 sequential bytes representing the PTS structure
+                    long b0 = data[ptsStartOffset]     & 0xFF;
+                    long b1 = data[ptsStartOffset + 1] & 0xFF;
+                    long b2 = data[ptsStartOffset + 2] & 0xFF;
+                    long b3 = data[ptsStartOffset + 3] & 0xFF;
+                    long b4 = data[ptsStartOffset + 4] & 0xFF;
+
+                    // Isolate and stitch the 33 bits:
+                    // Chunk 1: Bits 32-30 (from b0) -> mask with 0x0E, shift right 1, then shift up to bit 30
+                    long pts = stc_epoch + ((((b0 & 0x0E) >> 1) << 30) |
+                    // Chunk 2: Bits 29-15 (from b1 and b2) -> combine b1 and b2, mask out the LSB marker bit of b2, shift up to bit 15
+                            (((((b1 << 8) | b2) & 0xFFFE) >> 1) << 15) |
+                    // Chunk 3: Bits 14-0 (from b3 and b4) -> combine b3 and b4, mask out the LSB marker bit of b4
+                            ((((b3 << 8) | b4) & 0xFFFE) >> 1));
+
+                    __last_audio_pts_value = pts;
+                    SharedObjectRegistry.tracing_cookie = (int)(pts & 0xFFFF); // first 2 bytes of the pts
+//                    Trace.beginAsyncSection(SharedObjectRegistry.DEBUG_TRACING_PTS_TO_WRITE_SECTION, SharedObjectRegistry.tracing_cookie);
+                    mAudioPayloadHandler.addToQueue(new AudioPESFragment(pts));
+//                    Log.i(TAG, "Beginning of Audio PES: Got PTS: " + pts);
+
+                } else {
+                    if (__last_audio_pts_value != -1) {
+                        long pts = __last_audio_pts_value + NativeSourceSTCTracker.to90KhzClockTicks(Math.round(__audio_pes_packet_length_ns));
+                        SharedObjectRegistry.tracing_cookie = (int)(pts & 0xFFFF); // first 2 bytes of the pts
+//                        Trace.beginAsyncSection(SharedObjectRegistry.DEBUG_TRACING_PTS_TO_WRITE_SECTION, SharedObjectRegistry.tracing_cookie);
+                        mAudioPayloadHandler.addToQueue(new AudioPESFragment(pts));
+                        __last_audio_pts_value = pts;
+//                        Log.i(TAG, "Beginning of Audio PES: Calculated PTS: " + pts);
+                    }
+                }
+                // calculate how many samples exist within this PES packet's payload
+                int __audio_payload_samples = __audio_payload_length_bytes / SharedObjectRegistry.AUDIO_SAMPLE_SIZE_IN_BYTES;
+                __audio_pes_packet_length_ns = __audio_payload_samples * SharedObjectRegistry.AUDIO_SAMPLE_TIME_NS;
                 dataToReadOffset = offset + 9 + pesHeaderLen + 4; // LPCM header only appears when PUSI = 1
             }
         }
@@ -229,42 +375,34 @@ public class MpegTsPayloadDecoder extends Thread {
         }
     }
 
-    private void inplaceConvertToLE(byte[] buffer, int length) {
-        // Process full 4-byte stereo frames to prevent out-of-bounds reads
-        int limit = length - (length % 4);
-
-        for (int i = 0; i < limit; i += 4) {
-            // Swap Left Channel
-            byte b0 = buffer[i];
-            buffer[i] = buffer[i + 1];
-            buffer[i + 1] = b0;
-
-            // Swap Right Channel
-            byte b2 = buffer[i + 2];
-            buffer[i + 2] = buffer[i + 3];
-            buffer[i + 3] = b2;
-        }
-    }
 
     private void extractLpcmFrames() {
         if (mAudioBufferLength < 4) return; // if we don't even have a single frame why continue?
         int _origAudioBufLen = mAudioBufferLength;
-        byte[] _writebuf = new byte[4]; // write buffer
+        byte[] _writebuf = new byte[((int)(mAudioBufferLength/4))*4]; // write buffer
+        ByteBuffer __writebbuf;
         for (int i = 0; i < _origAudioBufLen;) {
             if (( i + 4 ) <= _origAudioBufLen) {
-                System.arraycopy(mAudioStreamBuffer, i, _writebuf, 0, 4);
-                inplaceConvertToLE(_writebuf, _writebuf.length);
-                mAudioPayloadHandler.addToQueue(_writebuf.clone());
+                System.arraycopy(mAudioStreamBuffer, i, _writebuf, i, 4);
+//                inplaceConvertToLE(_writebuf, _writebuf.length);
                 mAudioBufferLength -= 4;
                 i += 4;
             } else {
                 byte[] _tmpbuf = new byte[mAudioBufferLength];
                 System.arraycopy(mAudioStreamBuffer, i, _tmpbuf, 0, mAudioBufferLength);
-                Arrays.fill(mAudioStreamBuffer, (byte) 0);
+//                Arrays.fill(mAudioStreamBuffer, (byte) 0);
                 System.arraycopy(_tmpbuf,0,mAudioStreamBuffer,0,mAudioBufferLength);
-                return;
+                break;
             }
         }
+        __writebbuf = ByteBuffer.wrap(_writebuf);
+        __writebbuf.order(ByteOrder.BIG_ENDIAN);
+        ShortBuffer samples = __writebbuf.asShortBuffer();
+
+        short[] pcm = new short[samples.remaining()];
+        samples.get(pcm);
+
+        mAudioPayloadHandler.addToQueue(new AudioPESFragment(pcm.clone()));
     }
 
 
@@ -369,9 +507,11 @@ public class MpegTsPayloadDecoder extends Thread {
 
     private void tryToFeedDecoder(MediaCodec codec) {
         byte[] nalu;
+        boolean __noPayload;
         synchronized (mFeederLock) {
             try {
                 while (!mAvailableInputBuffersIndexs.isEmpty()) {
+                    __noPayload = false;
                     Integer ind = mAvailableInputBuffersIndexs.poll();
                     if (ind == null) return;
                     ByteBuffer buf = codec.getInputBuffer(ind);
@@ -384,9 +524,37 @@ public class MpegTsPayloadDecoder extends Thread {
                         return;
                     } else {
                         // if nalu != null
-                        buf.put(nalu);
+                        if (nalu[0] != SharedObjectRegistry.VIDEO_PTS_MARKER) {
+                            buf.put(nalu);
+                        } else {
+                            long __extractedPts = 0;
+                            __extractedPts = (((long) nalu[1] & 0xFF) << 56) |
+                                    (((long) nalu[2] & 0xFF) << 48) |
+                                    (((long) nalu[3] & 0xFF) << 40) |
+                                    (((long) nalu[4] & 0xFF) << 32) |
+                                    (((long) nalu[5] & 0xFF) << 24) |
+                                    (((long) nalu[6] & 0xFF) << 16) |
+                                    (((long) nalu[7] & 0xFF) <<  8) |
+                                    (((long) nalu[8] & 0xFF));
+                            if (__extractedPts == 0) {
+                                target_video_presentation_ns = -1;
+                            }
+                            else {
+                                target_video_presentation_ns = NativeSourceSTCTracker.sourceSTCToMonotonic(NativeSourceSTCTracker.toNanoSeconds(__extractedPts));
+                            }
+                            __noPayload = true;
+                        }
                         mPendingNALus.poll(); // remove head since I've used NALu.
-                        codec.queueInputBuffer(ind, 0, nalu.length, 0, 0);
+                        if (__noPayload) {
+                            codec.queueInputBuffer(ind, 0, 0, 0, 0);
+                        } else {
+                            if (target_video_presentation_ns != -1) {
+                                codec.queueInputBuffer(ind, 0, nalu.length, (target_video_presentation_ns / (long) 1000), 0);
+                            } else {
+                                // display immediately
+                                codec.queueInputBuffer(ind, 0, nalu.length, 0, 0);
+                            }
+                        }
                     }
                 }
             } catch (Throwable t) {

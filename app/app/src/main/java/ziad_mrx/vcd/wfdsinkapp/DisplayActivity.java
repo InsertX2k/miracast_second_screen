@@ -1,11 +1,13 @@
 package ziad_mrx.vcd.wfdsinkapp;
 
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.Window;
@@ -82,13 +84,17 @@ public class DisplayActivity extends AppCompatActivity implements SurfaceHolder.
     public void surfaceCreated(@NonNull SurfaceHolder holder) {
         // Generate Audio Session ID
         AudioManager am = (AudioManager) getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+        boolean supportsLowLatency = getApplicationContext().getPackageManager().hasSystemFeature(PackageManager.FEATURE_AUDIO_LOW_LATENCY);
+        int lowLatencyBufSizeInBytes = Integer.parseInt(((AudioManager) getApplicationContext().getSystemService(Context.AUDIO_SERVICE)).getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)) * SharedObjectRegistry.AUDIO_SAMPLE_SIZE_IN_BYTES;
         SharedObjectRegistry.AUDIO_TRACK_SESSION_ID = am.generateAudioSessionId();
         Log.i(TAG, "Audio Track Session ID: " + (SharedObjectRegistry.AUDIO_TRACK_SESSION_ID == AudioManager.ERROR ? "Failed to retrieve" : SharedObjectRegistry.AUDIO_TRACK_SESSION_ID));
-        mAPH = new AudioPayloadHandler();
+        mAPH = new AudioPayloadHandler(supportsLowLatency, lowLatencyBufSizeInBytes);
         // Feed live hardware Surface back into TS extraction pipeline
         mDecoderEngine = new MpegTsPayloadDecoder(holder.getSurface(), mAPH);
         mDecoderEngine.start();
         mAPH.start(); // start Audio Payload Handler thread!
+        // start source STC tracker!
+        NativeSourceSTCTracker.init();
     }
 
     @Override
@@ -118,5 +124,13 @@ public class DisplayActivity extends AppCompatActivity implements SurfaceHolder.
     protected void onDestroy() {
         super.onDestroy();
         doCleanup();
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        int ptrIdx = event.getPointerId(event.getActionIndex());
+        Log.i(TAG, "Touched point X: " + event.getRawX(ptrIdx) + ", Y: " + event.getRawY(ptrIdx));
+
+        return super.onTouchEvent(event);
     }
 }

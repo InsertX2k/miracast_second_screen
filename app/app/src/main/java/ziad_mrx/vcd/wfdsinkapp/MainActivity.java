@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
+import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.window.OnBackInvokedCallback;
@@ -24,6 +25,10 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.activity.EdgeToEdge;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -75,11 +80,35 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        mStatusText = new TextView(this);
-        mStatusText.setText("Waiting for Miracast Source connection...");
-        mStatusText.setTextSize(24f);
-        mStatusText.setGravity(android.view.Gravity.CENTER);
-        setContentView(mStatusText);
+//        mStatusText = new TextView(this);
+//        mStatusText.setText("Waiting for Miracast Source connection...");
+//        mStatusText.setTextSize(24f);
+//        mStatusText.setGravity(android.view.Gravity.CENTER);
+        setContentView(R.layout.activity_main);
+        final RelativeLayout content = findViewById(R.id.content);
+        // These are the padding values from XML.
+        final int baseLeft = content.getPaddingLeft();
+        final int baseTop = content.getPaddingTop();
+        final int baseRight = content.getPaddingRight();
+        final int baseBottom = content.getPaddingBottom();
+
+        ViewCompat.setOnApplyWindowInsetsListener(content, (v, insets) -> {
+            Insets systemBars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars()
+                            | WindowInsetsCompat.Type.displayCutout()
+            );
+
+            v.setPadding(
+                    baseLeft + systemBars.left,
+                    baseTop + systemBars.top,
+                    baseRight + systemBars.right,
+                    baseBottom + systemBars.bottom
+            );
+
+            return insets;
+        });
+
+        ViewCompat.requestApplyInsets(content);
 
         mSinkManager = new MiracastSinkManager(this);
 

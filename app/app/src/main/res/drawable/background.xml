@@ -1,0 +1,21 @@
+<vector xmlns:android="http://android.com"
+    android:width="360dp"
+    android:height="640dp"
+    android:viewportWidth="360"
+    android:viewportHeight="640">
+
+    <!-- Sky / Background Layer -->
+    <path
+        android:pathData="M0,0 h360 v640 h-360 Z"
+        android:fillColor="#2196F3"/>
+
+    <!-- Sun / Moon Element -->
+    <path
+        android:pathData="M180,200 m-40,0 a40,40 0,1,1 80,0 a40,40 0,1,1 -80,0"
+        android:fillColor="#FFEB3B"/>
+
+    <!-- Mountain / Horizon Layer -->
+    <path
+        android:pathData="M0,640 L0,480 L120,400 L240,500 L360,420 L360,640 Z"
+        android:fillColor="#4CAF50"/>
+</vector>

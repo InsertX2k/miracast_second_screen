@@ -33,11 +33,12 @@ public class SharedObjectRegistry {
     public static String sink_ip_addr = "";
 
     // AudioTrack buffer size in bytes
-    public static final int AUDIO_TRACK_BUF_SIZE = AudioTrack.getMinBufferSize(48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT); // 20 KB buffer
+    public static final int AUDIO_TRACK_BUF_SIZE = AudioTrack.getMinBufferSize(48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 2; // 20 KB buffer
 
     // Audio Attributes
-    public static final AudioAttributes AUDIO_TRACK_ATTRIBS = (new AudioAttributes.Builder()).setUsage(AudioAttributes.USAGE_MEDIA)
+    public static final AudioAttributes AUDIO_TRACK_ATTRIBS = (new AudioAttributes.Builder())
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .setUsage(AudioAttributes.USAGE_GAME)
             .setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_ALL)
             .build();
     // AudioFormat
@@ -56,5 +57,27 @@ public class SharedObjectRegistry {
     * and avoid handling any interactions at all.
     * */
     public static AtomicBoolean canPlayAudio = new AtomicBoolean(true);
+
+    public static final long TARGET_BACKLOG_NS = 15_000_000; // how many ns of audio time that must sit in the buffer at any moment.
+
+    public static final int AUDIO_SAMPLING_RATE = 48000;
+    public static final int AUDIO_SAMPLE_SIZE_IN_BYTES = 4; // 16-bit stereo LPCM
+
+    public static final long MAXIMUM_PCR_BASE_VALUE = 8589934591L;
+
+    public static final long PCR_JITTER_MARGIN = 135000; // 1.5 seconds of jitter margin
+
+    public static final double AUDIO_SAMPLE_TIME_NS = 1_000_000_000.0 / (double)AUDIO_SAMPLING_RATE;
+
+    public static final byte VIDEO_PTS_MARKER = 0x58; // 'X', indicating that this current queue element is a PTS value for a video PES
+
+    public static final long VIDEO_FRAME_DISPLAY_ACCEPTABLE_DELAY_US = 10_000; // 10 ms (around above a 60 fps frame)
+
+    public static final String DEBUG_TRACING_PTS_TO_WRITE_SECTION = "pts_to_write";
+    public static int tracing_cookie;
+
+    static {
+
+    }
 
 }
