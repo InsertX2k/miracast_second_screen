@@ -76,6 +76,9 @@ public class SharedObjectRegistry {
     public static final String DEBUG_TRACING_PTS_TO_WRITE_SECTION = "pts_to_write";
     public static int tracing_cookie;
 
+    public static int UIBC_SINK_PORT;
+
+
     static {
 
     }

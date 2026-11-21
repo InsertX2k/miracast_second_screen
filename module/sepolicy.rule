@@ -1,0 +1,2 @@
+# fixes OS error 13 (magisk su failed to connect to daemon) on AOSP 17+
+allow * magisk unix_stream_socket connectto

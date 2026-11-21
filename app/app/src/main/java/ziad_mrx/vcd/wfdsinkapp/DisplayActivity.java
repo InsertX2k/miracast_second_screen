@@ -128,9 +128,14 @@ public class DisplayActivity extends AppCompatActivity implements SurfaceHolder.
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        int ptrIdx = event.getPointerId(event.getActionIndex());
-        Log.i(TAG, "Touched point X: " + event.getRawX(ptrIdx) + ", Y: " + event.getRawY(ptrIdx));
+        try {
+            int ptrIdx = event.getPointerId(event.getActionIndex());
+            Log.i(TAG, "Touched point X: " + event.getRawX(ptrIdx) + ", Y: " + event.getRawY(ptrIdx));
 
-        return super.onTouchEvent(event);
+            return super.onTouchEvent(event);
+        } catch (Throwable t) {
+            Log.e(TAG, "Error at onTouchEvent!: " + t.getMessage());
+            return false;
+        }
     }
 }
