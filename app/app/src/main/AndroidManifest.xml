@@ -48,8 +48,7 @@
         <activity
             android:name=".DisplayActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="sensorLandscape" />
+            android:configChanges="orientation|screenSize|keyboardHidden" />
 
     </application>
 </manifest>

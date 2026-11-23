@@ -1,6 +1,6 @@
 id=wfdsinksysapp
 name=WFD Sink System App
-version=2.29
-versionCode=144
+version=2.49
+versionCode=164
 author=ziad_mrx
 description=A vibecoded WFD (Wifi Display) Sink app.

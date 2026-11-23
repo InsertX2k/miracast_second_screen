@@ -56,7 +56,7 @@ public class RtspServerEngine extends Thread {
         KNOWN_WFD_PARAMETERS.put("intel_sink_device_URL",SINK_INFO_URL);
         KNOWN_WFD_PARAMETERS.put("wfd_connector_type","07"); // Internal/Integrated.
         KNOWN_WFD_PARAMETERS.put("wfd_idr_request_capability","none");
-        KNOWN_WFD_PARAMETERS.put("wfd_uibc_capability","input_category_list=GENERIC;generic_cap_list=SingleTouch;hidc_cap_list=none;port=" + SharedObjectRegistry.UIBC_SINK_PORT);
+        KNOWN_WFD_PARAMETERS.put("wfd_uibc_capability","input_category_list=GENERIC, HIDC;generic_cap_list=Keyboard, Mouse, SingleTouch, MultiTouch;hidc_cap_list=SingleTouch/USB;port=none");
 //        KNOWN_WFD_PARAMETERS.put("wfd_display_edid","none");
 //        KNOWN_WFD_PARAMETERS.put("wfd_display_edid","0002 00ffffffffffff004dd9008201010101000f0103800000780a0dc9a05747982712484c00000001010101010101010101010101010101023a801871382d40582c450010090000001e8c0ad08a20e02d10103e9600040300000018000000fc00534f4e592054560a2020202020000000fd003b3d0f460f000a202020202020014502031c76480590030406070102230907078301000066030c00100080011d007251d01e206e28550010090000001e8c0aa01451f01600267c4300040300000098011d8018711c1620582c250010090000009e8c0ad08a20e02d10103e960010090000001800000000000000000000000000000000000000000000000000000061");
         KNOWN_WFD_PARAMETERS.put("wfd_display_edid","0002 00ffffffffffff004dd9008201010101000f0103800000780a0dc9a05747982712484c00000001010101010101010101010101010101023a801871382d40582c450010090000001e8c0ad08a20e02d10103e9600040300000018000000fc004d722e582053696e6b20417070000000fd003b3d0f460f000a20202020202001c702031c76480590030406070102230907078301000066030c00100080011d007251d01e206e28550010090000001e8c0aa01451f01600267c4300040300000098011d8018711c1620582c250010090000009e8c0ad08a20e02d10103e960010090000001800000000000000000000000000000000000000000000000000000061");
@@ -204,6 +204,21 @@ public class RtspServerEngine extends Thread {
 
                                 Log.i(TAG, "PLAY TRIGGERED! Starting Hardware H.264 Decoder...");
                                 mCallback.onPlayRequested();
+                            } else if (body.contains("wfd_uibc_capability:")) {
+                                Log.i(TAG, "Received WFD UIBC Capability from source!");
+                                int uibcport = 0;
+                                for (String l : body.split("\n")) {
+                                    if (l.split(":")[0].toLowerCase().contains("wfd_uibc_capability")) {
+                                        // get the UIBC port
+                                        String val = l.split(":")[1].trim();
+                                        uibcport = Integer.parseInt(val.substring(val.indexOf("port=")+5));
+                                        Log.i(TAG, "Found UIBC port at: " + uibcport);
+                                        break;
+                                    }
+                                }
+                                synchronized (SharedObjectRegistry.UIBC_PORT_LOCK) {
+                                    SharedObjectRegistry.UIBC_SINK_PORT = uibcport;
+                                }
                             }
 
                         } else if (method.equals("SETUP")) {
@@ -304,7 +319,7 @@ public class RtspServerEngine extends Thread {
         }).start();
     }
 
-    private List<String> findP2pPeerIps() {
+    public static List<String> findP2pPeerIps() {
         List<String> ips = new ArrayList<>();
         Process catARPs;
         try {

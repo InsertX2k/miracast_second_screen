@@ -25,6 +25,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private boolean hooksApplied = false;
 
+    private static final int EXT_CAP_BITS = 0x0001;                       // UIBC only; change to taste
+    private static final String EXT_CAP_SUBELEM = "07" + "0002" + String.format("%04x", EXT_CAP_BITS);
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (
@@ -105,6 +108,17 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                             }
                     );
+                }
+                // public boolean setWfdDeviceInfo(String hex) hook
+                if (m.getName().toLowerCase().contains("setWfdDeviceInfo".toLowerCase())) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            XposedBridge.log(TAG + "Set WFD device info called!, adding WFD Extended capability sub-elements!");
+                            String hx = (String)param.args[0];
+                            param.args[0] = hx + EXT_CAP_SUBELEM;
+                        }
+                    });
                 }
             }
             hooksApplied = true;

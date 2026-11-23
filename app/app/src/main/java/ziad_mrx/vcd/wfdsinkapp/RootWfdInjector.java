@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 
 public class RootWfdInjector {
     private static final int DEVICE_TYPE_PRIMARY_SINK = 1;
+    private static final int SOURCE_OR_PRIMARY_SINK = 3;
     private static final int WFD_PORT = 7236;
 
     public static void main(String[] args) {
@@ -49,10 +50,10 @@ public class RootWfdInjector {
             Class<?> wfdInfoClass = Class.forName("android.net.wifi.p2p.WifiP2pWfdInfo");
             Object wfdInfo = wfdInfoClass.getDeclaredConstructor().newInstance();
             wfdInfoClass.getMethod("setEnabled", boolean.class).invoke(wfdInfo, true);
-            wfdInfoClass.getMethod("setDeviceType", int.class).invoke(wfdInfo, DEVICE_TYPE_PRIMARY_SINK);
+            wfdInfoClass.getMethod("setDeviceType", int.class).invoke(wfdInfo, SOURCE_OR_PRIMARY_SINK);
             wfdInfoClass.getMethod("setSessionAvailable", boolean.class).invoke(wfdInfo, true);
             wfdInfoClass.getMethod("setControlPort", int.class).invoke(wfdInfo, WFD_PORT);
-            wfdInfoClass.getMethod("setMaxThroughput", int.class).invoke(wfdInfo, 150);
+            wfdInfoClass.getMethod("setMaxThroughput", int.class).invoke(wfdInfo, 300);
 
             // 6. Invoke WifiP2pManager.setWfdInfo() natively.
             // Because this executes as root, mService.checkConfigureWifiDisplayPermission() will pass naturally!

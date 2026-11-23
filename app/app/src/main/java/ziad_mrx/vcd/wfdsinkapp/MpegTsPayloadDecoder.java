@@ -1,5 +1,8 @@
 package ziad_mrx.vcd.wfdsinkapp;
 
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.content.pm.ActivityInfo;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
@@ -70,10 +73,13 @@ public class MpegTsPayloadDecoder extends Thread {
 
     private byte[] __video_pts_t_buffer = new byte[9]; // 8 (64-bits) for long + 1 byte for marker 'X'.
 
+    private DisplayActivity mdisplayActivity;
 
-    public MpegTsPayloadDecoder(Surface surface, AudioPayloadHandler audiopayloadhandler) {
+
+    public MpegTsPayloadDecoder(Surface surface, AudioPayloadHandler audiopayloadhandler, DisplayActivity dispActivity) {
         this.mSurface = surface;
         this.mAudioPayloadHandler = audiopayloadhandler;
+        this.mdisplayActivity = dispActivity;
     }
 
     @Override
@@ -129,11 +135,21 @@ public class MpegTsPayloadDecoder extends Thread {
                     }
                 }
 
+                @SuppressLint("SourceLockedOrientationActivity")
                 @Override
                 public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {
                     int new_width = format.getInteger(MediaFormat.KEY_WIDTH);
                     int new_height = format.getInteger(MediaFormat.KEY_HEIGHT);
                     Log.i(TAG, "Codec format changed: " + new_width + "x" + new_height);
+                    synchronized (SharedObjectRegistry.VID_DIMENS_ARRAY_LOCK) {
+                        SharedObjectRegistry.visible_video_dimens[0] = new_width;
+                        SharedObjectRegistry.visible_video_dimens[1] = new_height;
+                    }
+                    // if in portrait mode
+                    if (new_height > new_width) {
+                        Log.i(TAG, "Height > Width: rotating to portrait...");
+                        mdisplayActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                    }
                 }
             },callbackHandler);
             // if a client wishes to use this component asynchronuously, they must do it before the call

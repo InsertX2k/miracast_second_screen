@@ -29,6 +29,10 @@ public class SharedObjectRegistry {
 
     public static final Object SHARED_OBJ_LOCK = new Object();
 
+    public static final Object UIBC_PORT_LOCK = new Object();
+
+    public static final Object VID_DIMENS_ARRAY_LOCK = new Object();
+
 
     public static String sink_ip_addr = "";
 
@@ -76,7 +80,9 @@ public class SharedObjectRegistry {
     public static final String DEBUG_TRACING_PTS_TO_WRITE_SECTION = "pts_to_write";
     public static int tracing_cookie;
 
-    public static int UIBC_SINK_PORT;
+    public static int UIBC_SINK_PORT = 56561;
+
+    public static int[] visible_video_dimens = new int[2]; // [width, height]
 
 
     static {
